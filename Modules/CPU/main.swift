@@ -52,6 +52,59 @@ public struct IntelCPUDetails: Codable {
     var headroomMHz: Double?
     var limitReasons: [String] = []
     var frequencyDate: Date?
+
+    static let metrics = [
+        ("Average frequency", "MHz"), ("CPU temperature", "°C"), ("CPU package power", "W"),
+        ("Scheduler limit", "%"), ("Speed limit", "%"), ("Available logical CPUs", ""),
+        ("Frequency headroom limited", "MHz")
+    ]
+
+    static let logicalCount = Int(sysctlByName("hw.logicalcpu"))
+    static let physicalCount = Int(sysctlByName("hw.physicalcpu"))
+
+    static func threadName(_ id: Int) -> String { "\(localizedString("Logical thread")) \(id + 1)" }
+    static func coreThreadName(_ core: Int, _ thread: Int) -> String {
+        "\(localizedString("Physical core")) \(core) · \(localizedString("SMT")) \(thread + 1)"
+    }
+
+    static var chartMetrics: [(String, String)] {
+        let threads = physicalCount > 0 ? logicalCount / physicalCount : 0
+        var items = metrics.map { (localizedString($0.0), $0.1) }
+        for core in 0..<physicalCount {
+            for thread in 0..<threads {
+                items.append((coreThreadName(core, thread), "MHz"))
+            }
+        }
+        for thread in 0..<logicalCount {
+            items.append((threadName(thread), "%"))
+        }
+        return items
+    }
+
+    var values: [Double?] {
+        [self.averageMHz, self.temperature, self.packageWatts, self.scheduler.map(Double.init),
+         self.speed.map(Double.init), self.cpus.map(Double.init), self.headroomMHz]
+    }
+
+    var formattedValues: [String?] {
+        let average = self.averageMHz.map { "\(Int($0.rounded())) MHz" }
+        return [average ?? (self.frequencyDate == nil ? localizedString("Awaiting sampling") : nil),
+         self.temperature.map { Kit.temperature($0) },
+         self.packageWatts.map { String(format: "%.1f W", $0) },
+         self.scheduler.map { "\($0)%" }, self.speed.map { "\($0)%" },
+         self.cpus.map { "\($0)" }, self.headroomMHz.map { "\(Int($0.rounded())) MHz" }]
+    }
+
+    var formattedReasons: String? {
+        self.limitReasons.isEmpty ? nil : self.limitReasons.joined(separator: ", ")
+    }
+
+    func formattedCore(_ index: Int) -> String? {
+        guard self.coreThreadMHz.indices.contains(index), !self.coreThreadMHz[index].isEmpty else { return nil }
+        let threads = self.coreThreadMHz[index]
+        return threads.map { String(format: "%.1f", $0) }.joined(separator: " / ") + " MHz"
+    }
+
 }
 
 public struct CPU_AverageLoad: Codable, RemoteType {
@@ -140,11 +193,12 @@ public class CPU: Module {
     }
     
     public init() {
+        let intelHistory = TelemetryHistory()
         self.settingsView = Settings(.CPU)
-        self.popupView = Popup(.CPU)
+        self.popupView = Popup(.CPU, intelHistory: intelHistory)
         self.portalView = Portal(.CPU, height: 120)
         self.notificationsView = Notifications(.CPU)
-        self.previewView = Preview(.CPU)
+        self.previewView = Preview(.CPU, intelHistory: intelHistory)
         
         super.init(
             moduleType: .CPU,
@@ -174,6 +228,7 @@ public class CPU: Module {
             self.intelDetails = value
             self.intelDetailsLock.unlock()
             self.popupView.intelCallback(value)
+            self.previewView.intelCallback(value)
         }
         #else
         self.temperatureReader = TemperatureReader(.CPU, popup: true) { [weak self] value in

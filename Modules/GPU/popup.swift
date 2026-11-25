@@ -17,11 +17,6 @@ internal class Popup: PopupWrapper {
     private let dashboardHeight: CGFloat = 90
     private let chartHeight: CGFloat = 90 + Constants.Popup.separatorHeight
     private var detailsHeight: CGFloat { (isARM ? 22 * 4 : 22 * 7) + Constants.Popup.separatorHeight }
-    private let amdMetrics = [
-        ("Utilization", "$usage", "%"), ("Temperature", "$temperature", "°C"),
-        ("Core clock", "$core", "MHz"), ("Memory clock", "$memclock", "MHz"),
-        ("Fan speed", "$fan", "RPM"), ("Driver power", "$power", "W"), ("VRAM used", "$memory", "MiB")
-    ]
     private var amdFields: [NSTextField] = []
     private var amdHistory = TelemetryHistory()
     private var amdChart: TelemetryChartView?
@@ -193,7 +188,7 @@ internal class Popup: PopupWrapper {
             self.memoryField = popupRow(container, title: localizedString("Memory usage"), value: "").1
             self.fpsField = popupRow(container, title: "FPS", value: "").1
         } else {
-            self.amdFields = self.amdMetrics.map {
+            self.amdFields = GPU_Info.amdMetrics.map {
                 popupRow(container, title: localizedString($0.0), value: localizedString("Unavailable")).1
             }
         }
@@ -264,9 +259,7 @@ internal class Popup: PopupWrapper {
     private func installAMDChart() {
         guard let container = self.amdHistoryContainer else { return }
         self.amdChart?.removeFromSuperview()
-        let chart = TelemetryChartView(width: self.frame.width, metrics: self.amdMetrics.map {
-            (localizedString($0.0), $0.2)
-        }, history: self.amdHistory)
+        let chart = TelemetryChartView(width: self.frame.width, metrics: GPU_Info.amdChartMetrics, history: self.amdHistory)
         self.amdChart = chart
         container.addArrangedSubview(chart)
     }
@@ -281,10 +274,8 @@ internal class Popup: PopupWrapper {
                     self.amdHistory = TelemetryHistory()
                     self.installAMDChart()
                 }
-                let readings = [value.utilization.map { $0 * 100 }, value.temperature, value.coreMHz,
-                                value.memoryMHz, value.fanRPM, value.driverWatts, value.memory.map { $0 / 1_048_576 }]
-                for (index, metric) in self.amdMetrics.enumerated() {
-                    self.amdHistory.append(localizedString(metric.0), readings[index], at: date)
+                for (metric, reading) in zip(GPU_Info.amdMetrics, value.amdReadings) {
+                    self.amdHistory.append(localizedString(metric.0), reading, at: date)
                 }
                 self.amdChart?.historyUpdated()
             } else if let utilization = value.utilization {
@@ -298,7 +289,7 @@ internal class Popup: PopupWrapper {
     private func renderLoad(_ value: GPU_Info) {
         if !isARM {
             self.usageCircle?.isHidden = value.utilization == nil
-            for (index, metric) in self.amdMetrics.enumerated() where self.amdFields.indices.contains(index) {
+            for (index, metric) in GPU_Info.amdMetrics.enumerated() where self.amdFields.indices.contains(index) {
                 self.amdFields[index].stringValue = value.text(for: metric.1) ?? localizedString("Unavailable")
             }
             if let bytes = value.memory, let limit = value.memoryLimit, limit > 0 {

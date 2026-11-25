@@ -88,23 +88,12 @@ internal class Popup: PopupWrapper {
     private let temperatureCache = PopupCache<Double>()
     private let frequencyCache = PopupCache<CPU_Frequency>()
     private let intelCache = PopupCache<IntelCPUDetails>()
-    private let intelHistory = TelemetryHistory()
+    private let intelHistory: TelemetryHistory
     private var intelChart: TelemetryChartView?
     private var intelFields: [String: NSTextField] = [:]
     private var intelCoreText: NSTextField?
     private var lastFrequencyDate: Date?
 
-    private var logicalCount: Int { Int(sysctlByName("hw.logicalcpu")) }
-    private var physicalCount: Int { Int(sysctlByName("hw.physicalcpu")) }
-    private let intelMetrics = [
-        ("Average frequency", "MHz"), ("CPU temperature", "°C"), ("CPU package power", "W"),
-        ("Scheduler limit", "%"), ("Speed limit", "%"), ("Available logical CPUs", ""),
-        ("Frequency headroom limited", "MHz")
-    ]
-    private func threadName(_ id: Int) -> String { "\(localizedString("Logical thread")) \(id + 1)" }
-    private func coreThreadName(_ core: Int, _ thread: Int) -> String {
-        "\(localizedString("Physical core")) \(core) · \(localizedString("SMT")) \(thread + 1)"
-    }
     private let averageCache = PopupCache<CPU_AverageLoad>()
     
     private var processes: ProcessesView? = nil
@@ -150,7 +139,8 @@ internal class Popup: PopupWrapper {
         return value
     }
     
-    public init(_ module: ModuleType) {
+    public init(_ module: ModuleType, intelHistory: TelemetryHistory) {
+        self.intelHistory = intelHistory
         super.init(module, frame: NSRect(x: 0, y: 0, width: Constants.Popup.width, height: 0))
         
         self.spacing = 0
@@ -315,7 +305,7 @@ internal class Popup: PopupWrapper {
         view.addArrangedSubview(separator)
         view.addArrangedSubview(lineChartContainer)
         
-        if let cores = isARM ? SystemKit.shared.device.info.cpu?.logicalCores.map(Int.init) : self.logicalCount, cores > 0 {
+        if let cores = isARM ? SystemKit.shared.device.info.cpu?.logicalCores.map(Int.init) : IntelCPUDetails.logicalCount, cores > 0 {
             let barChartContainer: NSView = {
                 let box: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 50))
                 box.heightAnchor.constraint(equalToConstant: box.frame.height).isActive = true
@@ -360,7 +350,7 @@ internal class Popup: PopupWrapper {
         (self.idleColorView, _, self.idleField) = popupWithColorRow(container, color: self.idleColor.withAlphaComponent(0.5), title: "\(localizedString("Idle")):", value: "")
         
         if !isARM {
-            for (name, _) in self.intelMetrics.dropFirst() {
+            for (name, _) in IntelCPUDetails.metrics.dropFirst() {
                 self.intelFields[name] = popupRow(container, title: localizedString(name), value: localizedString("Unavailable")).1
             }
             self.intelFields["Reported limit reasons"] = popupRow(
@@ -411,7 +401,7 @@ internal class Popup: PopupWrapper {
         view.spacing = 0
         view.addArrangedSubview(separatorView(localizedString("Frequency"), origin: .zero, width: self.frame.width))
         self.intelFields["Average frequency"] = popupRow(
-            view, title: localizedString("Average frequency"), value: localizedString("Unavailable")
+            view, title: localizedString("Average frequency"), value: localizedString("Awaiting sampling")
         ).1
         view.addArrangedSubview(separatorView(localizedString("Physical cores · SMT frequency averages"), origin: .zero, width: self.frame.width))
 
@@ -433,17 +423,7 @@ internal class Popup: PopupWrapper {
         self.intelCoreText = text
         view.addArrangedSubview(scroller)
 
-        let threads = self.physicalCount > 0 ? self.logicalCount / self.physicalCount : 0
-        var metrics = self.intelMetrics.map { (localizedString($0.0), $0.1) }
-        for core in 0..<self.physicalCount {
-            for thread in 0..<threads {
-                metrics.append((self.coreThreadName(core, thread), "MHz"))
-            }
-        }
-        for thread in 0..<self.logicalCount {
-            metrics.append((self.threadName(thread), "%"))
-        }
-        let chart = TelemetryChartView(width: self.frame.width, metrics: metrics, history: self.intelHistory)
+        let chart = TelemetryChartView(width: self.frame.width, metrics: IntelCPUDetails.chartMetrics, history: self.intelHistory)
         self.intelChart = chart
         view.addArrangedSubview(chart)
         return view
@@ -509,7 +489,7 @@ internal class Popup: PopupWrapper {
             self.lineChart?.historyUpdated()
             if let logical = value.logicalUsage {
                 for (index, usage) in logical.enumerated() {
-                    self.intelHistory.append(self.threadName(index), usage.map { $0 * 100 }, at: date)
+                    self.intelHistory.append(IntelCPUDetails.threadName(index), usage.map { $0 * 100 }, at: date)
                 }
                 self.intelChart?.historyUpdated()
             }
@@ -555,7 +535,7 @@ internal class Popup: PopupWrapper {
         if isARM {
             self.columnChart?.setValues(usagePerCore)
         } else {
-            let logical = value.logicalUsage ?? [Double?](repeating: nil, count: self.logicalCount)
+            let logical = value.logicalUsage ?? [Double?](repeating: nil, count: IntelCPUDetails.logicalCount)
             self.columnChart?.setOptionalValues(logical, label: localizedString("Logical thread"))
         }
         self.columnChart?.display()
@@ -651,19 +631,15 @@ internal class Popup: PopupWrapper {
         DispatchQueue.main.async {
             let date = Date()
             let sampled = value.frequencyDate != nil && value.frequencyDate != self.lastFrequencyDate
-            let values: [Double?] = [
-                value.averageMHz, value.temperature, value.packageWatts, value.scheduler.map(Double.init),
-                value.speed.map(Double.init), value.cpus.map(Double.init), value.headroomMHz
-            ]
-            for (index, metric) in self.intelMetrics.enumerated() {
+            for (index, reading) in value.values.enumerated() {
                 if (index == 0 || index == 6) && !sampled { continue }
-                self.intelHistory.append(localizedString(metric.0), values[index], at: date)
+                self.intelHistory.append(localizedString(IntelCPUDetails.metrics[index].0), reading, at: date)
             }
             if sampled {
                 self.lastFrequencyDate = value.frequencyDate
                 for (core, threads) in value.coreThreadMHz.enumerated() {
                     for (thread, mhz) in threads.enumerated() {
-                        self.intelHistory.append(self.coreThreadName(core, thread), mhz, at: date)
+                        self.intelHistory.append(IntelCPUDetails.coreThreadName(core, thread), mhz, at: date)
                     }
                 }
             }
@@ -673,17 +649,11 @@ internal class Popup: PopupWrapper {
 
     private func renderIntel(_ value: IntelCPUDetails) {
         let unavailable = localizedString("Unavailable")
-        let values = [
-            value.averageMHz.map { "\(Int($0.rounded())) MHz" },
-            value.temperature.map { temperature($0) },
-            value.packageWatts.map { String(format: "%.1f W", $0) },
-            value.scheduler.map { "\($0)%" }, value.speed.map { "\($0)%" },
-            value.cpus.map { "\($0)" }, value.headroomMHz.map { "\(Int($0.rounded())) MHz" }
-        ]
-        for (index, metric) in self.intelMetrics.enumerated() {
+        let values = value.formattedValues
+        for (index, metric) in IntelCPUDetails.metrics.enumerated() {
             self.intelFields[metric.0]?.stringValue = values[index] ?? unavailable
         }
-        let reasons = value.limitReasons.isEmpty ? nil : value.limitReasons.joined(separator: ", ")
+        let reasons = value.formattedReasons
         self.intelFields["Reported limit reasons"]?.stringValue = reasons ?? unavailable
         self.intelFields["Reported limit reasons"]?.toolTip = reasons
         self.intelFields["CPU package power"]?.toolTip = value.packageWatts.map { _ in
@@ -700,10 +670,8 @@ internal class Popup: PopupWrapper {
             self.frequencyCircle?.toolTip = values[0]
         }
 
-        let coreText = (0..<self.physicalCount).map { index -> String in
-            let threads = value.coreThreadMHz.indices.contains(index) ? value.coreThreadMHz[index] : []
-            let reading = threads.map { String(format: "%.1f", $0) }.joined(separator: " / ")
-            return "\(localizedString("Core")) \(index)   \(threads.isEmpty ? unavailable : reading + " MHz")"
+        let coreText = (0..<IntelCPUDetails.physicalCount).map { index in
+            "\(localizedString("Core")) \(index)   \(value.formattedCore(index) ?? unavailable)"
         }.joined(separator: "\n")
         self.intelCoreText?.stringValue = coreText.isEmpty ? unavailable : coreText
         if let text = self.intelCoreText, let document = text.superview {

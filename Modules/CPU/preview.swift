@@ -17,6 +17,12 @@ internal class Preview: PreviewWrapper {
     private var latestLoad: CPU_Load?
     private var latestAverage: CPU_AverageLoad?
     private var latestFrequency: CPU_Frequency?
+    private var latestIntel: IntelCPUDetails?
+    private let intelHistory: TelemetryHistory
+    private var intelChart: TelemetryChartView?
+    private var intelFields: [NSTextField] = []
+    private var intelReasonField: NSTextField?
+    private var intelCoreFields: [NSTextField] = []
     private var latestProcesses: [TopProcess]?
     
     private var initialized: Bool = false
@@ -81,22 +87,34 @@ internal class Preview: PreviewWrapper {
         Store.shared.int(key: "\(self.module.stringValue)_processes", defaultValue: 8)
     }
     
-    public init(_ module: ModuleType) {
+    public init(_ module: ModuleType, intelHistory: TelemetryHistory) {
+        self.intelHistory = intelHistory
         super.init(type: module)
     }
     
     public override func loadContent() {
         self.addArrangedSubview(PreferencesSection([self.totalView()]))
         self.addArrangedSubview(PreferencesSection(title: localizedString("Usage history"), [self.historyView()]))
-        self.addArrangedSubview(PreferencesSection(title: localizedString("Load per core"), [self.coresView()]))
+        let coresTitle = isARM ? "Load per core" : "Logical thread usage"
+        self.addArrangedSubview(PreferencesSection(title: localizedString(coresTitle), [self.coresView()]))
         
         let splitView = NSStackView()
         splitView.orientation = .horizontal
         splitView.distribution = .fillEqually
         splitView.addArrangedSubview(PreferencesSection(title: localizedString("Average load"), [self.averageView()]))
-        splitView.addArrangedSubview(PreferencesSection(title: localizedString("Frequency"), [self.frequencyView()]))
+        if isARM {
+            splitView.addArrangedSubview(PreferencesSection(title: localizedString("Frequency"), [self.frequencyView()]))
+        } else {
+            splitView.addArrangedSubview(PreferencesSection(title: localizedString("Details"), [self.intelDetailsView()]))
+        }
         
         self.addArrangedSubview(splitView)
+        if !isARM {
+            self.addArrangedSubview(PreferencesSection(title: localizedString("Physical cores · SMT frequency averages"), [self.intelFrequenciesView()]))
+            let chart = TelemetryChartView(width: Constants.Popup.width, metrics: IntelCPUDetails.chartMetrics, history: self.intelHistory)
+            self.intelChart = chart
+            self.addArrangedSubview(PreferencesSection(title: localizedString("Metric history"), [chart]))
+        }
         
         self.addArrangedSubview(self.topProcesses())
         
@@ -105,6 +123,7 @@ internal class Preview: PreviewWrapper {
         if let value = self.latestLoad { self.renderLoad(value) }
         if let value = self.latestAverage { self.renderAverage(value) }
         if let value = self.latestFrequency { self.renderFrequency(value) }
+        if let value = self.latestIntel { self.renderIntel(value) }
         if let list = self.latestProcesses { self.renderProcesses(list) }
     }
     
@@ -113,6 +132,10 @@ internal class Preview: PreviewWrapper {
         self.arrangedSubviews.forEach { self.removeArrangedSubview($0) }
         self.subviews.forEach { $0.removeFromSuperview() }
         self.cores.removeAll()
+        self.intelChart = nil
+        self.intelFields.removeAll()
+        self.intelReasonField = nil
+        self.intelCoreFields.removeAll()
         self.circle = nil
         self.bar = nil
         self.loadLineChart = nil
@@ -188,7 +211,11 @@ internal class Preview: PreviewWrapper {
             let title = NSStackView()
             title.addArrangedSubview(LabelField(titleValue, size: 13))
             title.addArrangedSubview(NSView())
-            title.addArrangedSubview(LabelField(clastersValue, size: 11))
+            if isARM {
+                title.addArrangedSubview(LabelField(clastersValue, size: 11))
+            } else {
+                title.addArrangedSubview(LabelField("\(IntelCPUDetails.physicalCount) \(localizedString("Physical cores")) · \(IntelCPUDetails.logicalCount) \(localizedString("Logical threads"))", size: 11))
+            }
             
             let bar = BarChartView(size: 9, horizontal: true)
             self.bar = bar
@@ -243,6 +270,22 @@ internal class Preview: PreviewWrapper {
         view.distribution = .fillEqually
         view.spacing = Constants.Settings.margin
         
+        if !isARM {
+            let columns = (0..<4).map { _ -> NSStackView in
+                let column = NSStackView()
+                column.orientation = .vertical
+                column.spacing = Constants.Settings.margin / 2
+                view.addArrangedSubview(column)
+                return column
+            }
+            for index in 0..<IntelCPUDetails.logicalCount {
+                let thread = CoreView(nil, num: index + 1)
+                columns[index % columns.count].addArrangedSubview(thread)
+                self.cores.append(thread)
+            }
+            return view
+        }
+
         let leftColumn: NSStackView = NSStackView()
         leftColumn.orientation = .vertical
         leftColumn.distribution = .fillEqually
@@ -324,6 +367,55 @@ internal class Preview: PreviewWrapper {
         return view
     }
     
+    private func intelDetailsView() -> NSView {
+        let view = NSStackView()
+        view.orientation = .vertical
+        self.intelFields = IntelCPUDetails.metrics.map { metric in
+            let status = metric.0 == "Average frequency" ? "Awaiting sampling" : "Unavailable"
+            return previewRow(view, title: localizedString(metric.0), value: localizedString(status))
+        }
+        self.intelReasonField = previewRow(view, title: localizedString("Reported limit reasons"), value: localizedString("Unavailable"))
+        return view
+    }
+
+    private func intelFrequenciesView() -> NSView {
+        let view = NSStackView()
+        view.orientation = .horizontal
+        view.distribution = .fillEqually
+        let columns = (0..<2).map { _ -> NSStackView in
+            let column = NSStackView()
+            column.orientation = .vertical
+            view.addArrangedSubview(column)
+            return column
+        }
+        for index in 0..<IntelCPUDetails.physicalCount {
+            self.intelCoreFields.append(previewRow(columns[index % columns.count],
+                                                   title: "\(localizedString("Core")) \(index)", value: localizedString("Unavailable")))
+        }
+        return view
+    }
+
+    internal func intelCallback(_ value: IntelCPUDetails) {
+        DispatchQueue.main.async {
+            self.latestIntel = value
+            self.intelChart?.historyUpdated()
+            guard self.contentLoaded else { return }
+            self.renderIntel(value)
+        }
+    }
+
+    private func renderIntel(_ value: IntelCPUDetails) {
+        let unavailable = localizedString("Unavailable")
+        for (field, reading) in zip(self.intelFields, value.formattedValues) {
+            field.stringValue = reading ?? unavailable
+        }
+        self.intelReasonField?.stringValue = value.formattedReasons ?? unavailable
+        self.intelReasonField?.toolTip = value.formattedReasons
+        for (index, field) in self.intelCoreFields.enumerated() {
+            field.stringValue = value.formattedCore(index) ?? unavailable
+        }
+    }
+
     private func topProcesses() -> NSView {
         let view = ProcessesView(
             values: [(localizedString("Usage"), nil)],
@@ -401,10 +493,18 @@ internal class Preview: PreviewWrapper {
                 ColorValue(value.userLoad, color: self.userColor)
             ])
             
-            for (i, v) in value.usagePerCore.enumerated() {
-                if let core = self.cores.first(where: {$0.identifier?.rawValue == "\(i)" }) {
-                    core.setValue(v)
+            if isARM {
+                for (i, v) in value.usagePerCore.enumerated() {
+                    if let core = self.cores.first(where: {$0.identifier?.rawValue == "\(i)" }) {
+                        core.setValue(v)
+                    }
                 }
+            } else {
+                let usage = value.logicalUsage ?? []
+                for (index, thread) in self.cores.enumerated() {
+                    thread.setValue(usage.indices.contains(index) ? usage[index] : nil)
+                }
+                self.intelChart?.historyUpdated()
             }
             
             self.initialized = true
@@ -462,7 +562,7 @@ internal class Preview: PreviewWrapper {
 }
 
 class CoreView: NSStackView {
-    private let core: core_s
+    private let core: core_s?
     
     private let valueField = ValueField()
     private var bar: BarChartView = BarChartView(size: 8, horizontal: true)
@@ -492,7 +592,7 @@ class CoreView: NSStackView {
         return color.additional as! NSColor
     }
     
-    public init(_ core: core_s, num: Int) {
+    public init(_ core: core_s?, num: Int) {
         self.core = core
         
         super.init(frame: .zero)
@@ -500,7 +600,7 @@ class CoreView: NSStackView {
         self.heightAnchor.constraint(equalToConstant: 24).isActive = true
         self.orientation = .vertical
         self.distribution = .fillEqually
-        self.identifier = NSUserInterfaceItemIdentifier("\(core.id)")
+        self.identifier = NSUserInterfaceItemIdentifier(core.map { "\($0.id)" } ?? "\(num - 1)")
         
         self.bar.heightAnchor.constraint(equalToConstant: 8).isActive = true
         self.valueField.font = .systemFont(ofSize: 12)
@@ -510,10 +610,11 @@ class CoreView: NSStackView {
         header.distribution = .fill
         
         var title: String
-        switch core.type {
+        switch core?.type {
         case .efficiency: title = localizedString("Efficiency core")
         case .performance: title = localizedString("Performance core")
         case .super: title = localizedString("Super core")
+        case nil: title = localizedString("Logical thread")
         default: title = localizedString("Core")
         }
         title += " \(num)"
@@ -530,9 +631,17 @@ class CoreView: NSStackView {
         fatalError("init(coder:) has not been implemented")
     }
     
-    public func setValue(_ newValue: Double) {
-        self.valueField.stringValue = "\(Int(newValue.rounded(toPlaces: 2) * 100))%"
-        let color = self.core.type == .efficiency ? self.eCoresColor : self.core.type == .super ? self.sCoresColor : self.pCoresColor
+    public func setValue(_ newValue: Double?) {
+        self.valueField.stringValue = newValue.map { "\(Int(($0 * 100).rounded()))%" } ?? localizedString("Unavailable")
+        self.bar.isHidden = newValue == nil
+        guard let newValue else { return }
+        let color: NSColor
+        switch self.core?.type {
+        case .efficiency: color = self.eCoresColor
+        case .super: color = self.sCoresColor
+        case nil: color = .systemBlue
+        default: color = self.pCoresColor
+        }
         self.bar.setValue(ColorValue(newValue, color: color))
     }
 }

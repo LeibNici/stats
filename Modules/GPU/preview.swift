@@ -19,6 +19,12 @@ internal class Preview: PreviewWrapper {
     private let aneHistory = LineChartData(capacity: 600)
     private let memoryHistory = LineChartData(capacity: 600)
     private let fpsHistory = LineChartData(capacity: 600)
+    private var amdHistory = TelemetryHistory()
+    private var amdDeviceID: String?
+    private var amdHistoryContainer: NSStackView?
+    private var amdChart: TelemetryChartView?
+    private var amdFields: [NSTextField] = []
+    private var amdModelField: NSTextField?
     
     private var initialized: Bool = false
     private var initializedProcesses: Bool = false
@@ -57,6 +63,10 @@ internal class Preview: PreviewWrapper {
     }
     
     public override func loadContent() {
+        if !isARM {
+            self.loadAMDContent()
+            return
+        }
         self.addArrangedSubview(PreferencesSection([self.quickView()]))
         
         let (historyView, historyChart) = self.historyView(self.utilizationHistory)
@@ -105,6 +115,10 @@ internal class Preview: PreviewWrapper {
         self.processes = nil
         self.processesSection = nil
         self.fpsField = nil
+        self.amdHistoryContainer = nil
+        self.amdChart = nil
+        self.amdFields.removeAll()
+        self.amdModelField = nil
         self.utilizationBar = nil
         self.utilizationField = nil
         self.renderBar = nil
@@ -125,6 +139,43 @@ internal class Preview: PreviewWrapper {
         fatalError("init(coder:) has not been implemented")
     }
     
+    private func loadAMDContent() {
+        let details = NSStackView()
+        details.orientation = .vertical
+        let model = LabelField(SystemKit.shared.device.info.gpu?.first?.name ?? localizedString("Unknown"))
+        self.amdModelField = model
+        details.addArrangedSubview(model)
+        self.amdFields = GPU_Info.amdMetrics.map { metric in
+            previewRow(details, title: localizedString(metric.0), value: localizedString("Unavailable"))
+        }
+        self.addArrangedSubview(PreferencesSection([details]))
+
+        let container = NSStackView()
+        container.orientation = .vertical
+        self.amdHistoryContainer = container
+        self.installAMDChart()
+        self.addArrangedSubview(PreferencesSection(title: localizedString("Metric history"), [container]))
+        if let value = self.latestLoad { self.renderAMD(value) }
+    }
+
+    private func installAMDChart() {
+        guard let container = self.amdHistoryContainer else { return }
+        if let chart = self.amdChart {
+            container.removeArrangedSubview(chart)
+            chart.removeFromSuperview()
+        }
+        let chart = TelemetryChartView(width: Constants.Popup.width, metrics: GPU_Info.amdChartMetrics, history: self.amdHistory)
+        self.amdChart = chart
+        container.addArrangedSubview(chart)
+    }
+
+    private func renderAMD(_ value: GPU_Info) {
+        if !value.model.isEmpty { self.amdModelField?.stringValue = value.model }
+        for (field, metric) in zip(self.amdFields, GPU_Info.amdMetrics) {
+            field.stringValue = value.text(for: metric.1) ?? localizedString("Unavailable")
+        }
+    }
+
     private func quickView() -> NSView {
         let view = NSStackView()
         view.distribution = .fill
@@ -156,7 +207,7 @@ internal class Preview: PreviewWrapper {
                 }
             }
             
-            let fpsField = LabelField("0 FPS")
+            let fpsField = LabelField(localizedString("Unavailable"))
             self.fpsField = fpsField
             
             let title = NSStackView()
@@ -318,6 +369,19 @@ internal class Preview: PreviewWrapper {
         let date = Date()
         DispatchQueue.main.async(execute: {
             self.latestLoad = value
+            if !isARM {
+                if !value.id.isEmpty, self.amdDeviceID != value.id {
+                    self.amdDeviceID = value.id
+                    self.amdHistory = TelemetryHistory()
+                    self.installAMDChart()
+                }
+                for (metric, reading) in zip(GPU_Info.amdMetrics, value.amdReadings) {
+                    self.amdHistory.append(localizedString(metric.0), reading, at: date)
+                }
+                self.amdChart?.historyUpdated()
+                if self.contentLoaded { self.renderAMD(value) }
+                return
+            }
             if let value = value.utilization {
                 self.utilizationHistory.append(DoubleValue(value, at: date))
                 self.utilizationLineChart?.historyUpdated()
@@ -357,9 +421,7 @@ internal class Preview: PreviewWrapper {
                 self.aneField?.stringValue = "\(Int(value.rounded(toPlaces: 2) * 100))%"
                 self.aneBar?.setValue(ColorValue(value))
             }
-            if let value = value.fps {
-                self.fpsField?.stringValue = "\(Int(value)) FPS"
-            }
+            self.fpsField?.stringValue = value.fps.map { "\(Int($0)) FPS" } ?? localizedString("Unavailable")
             self.initialized = true
         }
     }

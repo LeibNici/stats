@@ -599,3 +599,6 @@
 "Reported limit reasons" = "Reported limit reasons";
 "SMT" = "SMT";
 "VRAM used" = "VRAM used";
+"Physical cores" = "Physical cores";
+"Logical threads" = "Logical threads";
+"Awaiting sampling" = "Awaiting sampling";

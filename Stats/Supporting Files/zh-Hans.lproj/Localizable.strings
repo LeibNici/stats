@@ -599,3 +599,6 @@
 "Reported limit reasons" = "报告的限速原因";
 "SMT" = "SMT";
 "VRAM used" = "已用显存";
+"Physical cores" = "物理核心";
+"Logical threads" = "逻辑线程";
+"Awaiting sampling" = "等待采样";

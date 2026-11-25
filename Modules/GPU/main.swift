@@ -45,6 +45,21 @@ public struct GPU_Info: Codable {
     public var fanRPM: Double? = nil
     public var driverWatts: Double? = nil
 
+    static let amdMetrics = [
+        ("Utilization", "$usage", "%"), ("Temperature", "$temperature", "°C"),
+        ("Core clock", "$core", "MHz"), ("Memory clock", "$memclock", "MHz"),
+        ("Fan speed", "$fan", "RPM"), ("Driver power", "$power", "W"), ("VRAM used", "$memory", "MiB")
+    ]
+
+    static var amdChartMetrics: [(String, String)] {
+        amdMetrics.map { (localizedString($0.0), $0.2) }
+    }
+
+    var amdReadings: [Double?] {
+        [self.utilization.map { $0 * 100 }, self.temperature, self.coreMHz,
+         self.memoryMHz, self.fanRPM, self.driverWatts, self.memory.map { $0 / 1_048_576 }]
+    }
+
     internal func text(for key: String) -> String? {
         switch key {
         case "$usage": return self.utilization.map { "\(Int(($0 * 100).rounded()))%" }
@@ -218,7 +233,9 @@ public class GPU: Module {
             self.portalView.callback(selectedGPU)
             self.previewView.loadCallback(selectedGPU)
         } else if !isARM {
-            self.popupView.loadCallback(GPU_Info(id: "", type: "", IOClass: "", model: ""))
+            let unavailable = GPU_Info(id: "", type: "", IOClass: "", model: "")
+            self.popupView.loadCallback(unavailable)
+            self.previewView.loadCallback(unavailable)
         }
         if let utilization { self.notificationsView.usageCallback(utilization) }
 

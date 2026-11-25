@@ -1876,6 +1876,7 @@ public final class TelemetryChartView: NSView {
         self.selector = NSPopUpButton(frame: NSRect(x: 7, y: 68, width: width - 14, height: 24))
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 96))
         self.heightAnchor.constraint(equalToConstant: 96).isActive = true
+        self.selector.autoresizingMask = [.width]
         self.selector.setAccessibilityLabel(localizedString("Metric history"))
         self.selector.addItems(withTitles: metrics.map { $0.0 })
         self.selector.target = self
@@ -1896,6 +1897,7 @@ public final class TelemetryChartView: NSView {
             frame: NSRect(x: 7, y: 0, width: self.bounds.width - 14, height: 62),
             suffix: "", scale: .linear, zeroValue: 0, animation: false, history: self.history.series(metric.name)
         )
+        chart.autoresizingMask = [.width]
         chart.setToolTipFunc { sample in
             String(format: "%.1f %@", sample.value, metric.unit)
         }
