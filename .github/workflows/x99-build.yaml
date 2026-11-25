@@ -65,8 +65,23 @@ jobs:
           PY
           ditto -c -k --sequesterRsrc --keepParent "$STATS_APP" "$RUNNER_TEMP/Stats-x86_64.zip"
 
+      - name: Package and verify DMG
+        run: |
+          stage="$(mktemp -d "$RUNNER_TEMP/stats-dmg.XXXXXX")"
+          ditto -x -k "$RUNNER_TEMP/Stats-x86_64.zip" "$stage"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -quiet -volname 'Stats for X99' -srcfolder "$stage" -format UDZO "$RUNNER_TEMP/Stats-x86_64.dmg"
+          hdiutil verify "$RUNNER_TEMP/Stats-x86_64.dmg"
+
       - uses: actions/upload-artifact@v7
         with:
           name: Stats-x86_64
           path: ${{ runner.temp }}/Stats-x86_64.zip
           if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Stats-x86_64-dmg
+          path: ${{ runner.temp }}/Stats-x86_64.dmg
+          if-no-files-found: error
+          compression-level: 0
