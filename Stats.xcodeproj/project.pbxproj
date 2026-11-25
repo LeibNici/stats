@@ -140,6 +140,8 @@
 		9A2848082666AB3000EC1F6D /* updater.sh in Resources */ = {isa = PBXBuildFile; fileRef = 9A2848012666AB2F00EC1F6D /* updater.sh */; };
 		9A2848092666AB3000EC1F6D /* Store.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2848022666AB2F00EC1F6D /* Store.swift */; };
 		9A28480A2666AB3000EC1F6D /* SystemKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2848032666AB2F00EC1F6D /* SystemKit.swift */; };
+		9F011A012ADD000000000003 /* intel-cpu-samples.rb in Resources */ = {isa = PBXBuildFile; fileRef = 9F011A012ADD000000000004 /* intel-cpu-samples.rb */; };
+		9F011A012ADD000000000001 /* IntelTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F011A012ADD000000000002 /* IntelTelemetry.swift */; };
 		9A28480B2666AB3000EC1F6D /* Charts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2848042666AB2F00EC1F6D /* Charts.swift */; };
 		9A28480E2666AB3000EC1F6D /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2848072666AB3000EC1F6D /* Updater.swift */; };
 		9A28481E2666AB3600EC1F6D /* extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A28481A2666AB3500EC1F6D /* extensions.swift */; };
@@ -639,6 +641,7 @@
 		5EC1B2E42E2FEAFB007042A6 /* UnitedWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnitedWidget.swift; sourceTree = "<group>"; };
 		5EE5C0B83062FEA400E7DAB4 /* install.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = install.sh; sourceTree = "<group>"; };
 		5EE8037E29C36BDD0063D37D /* portal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = portal.swift; sourceTree = "<group>"; };
+		9F011A012ADD000000000004 /* intel-cpu-samples.rb */ = {isa = PBXFileReference; lastKnownFileType = text.script.ruby; path = "intel-cpu-samples.rb"; sourceTree = "<group>"; };
 		5EF7B23D30A1D8000045B7F1 /* generate-menu-bar-icon.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "generate-menu-bar-icon.sh"; sourceTree = "<group>"; };
 		62BA5F74254810C8009D0AC2 /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = es.lproj/Localizable.strings; sourceTree = "<group>"; };
 		63A07F97275018DF00352C46 /* ca */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ca; path = ca.lproj/Localizable.strings; sourceTree = "<group>"; };
@@ -680,6 +683,7 @@
 		9A2848012666AB2F00EC1F6D /* updater.sh */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.sh; path = updater.sh; sourceTree = "<group>"; };
 		9A2848022666AB2F00EC1F6D /* Store.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Store.swift; sourceTree = "<group>"; };
 		9A2848032666AB2F00EC1F6D /* SystemKit.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SystemKit.swift; sourceTree = "<group>"; };
+		9F011A012ADD000000000002 /* IntelTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntelTelemetry.swift; sourceTree = "<group>"; };
 		9A2848042666AB2F00EC1F6D /* Charts.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Charts.swift; sourceTree = "<group>"; };
 		9A2848072666AB3000EC1F6D /* Updater.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Updater.swift; sourceTree = "<group>"; };
 		9A28481A2666AB3500EC1F6D /* extensions.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = extensions.swift; sourceTree = "<group>"; };
@@ -1197,6 +1201,7 @@
 				9A2848012666AB2F00EC1F6D /* updater.sh */,
 				5EE5C0B83062FEA400E7DAB4 /* install.sh */,
 				5CFE494129265418000F2856 /* uninstall.sh */,
+				9F011A012ADD000000000004 /* intel-cpu-samples.rb */,
 				5EF7B23D30A1D8000045B7F1 /* generate-menu-bar-icon.sh */,
 				9A46BF35266D6E17001A1117 /* i18n.py */,
 				5CFE494329265421000F2856 /* changelog.py */,
@@ -1304,6 +1309,7 @@
 			children = (
 				5C038CF52D86EE8700516809 /* SystemStats.swift */,
 				9A2848022666AB2F00EC1F6D /* Store.swift */,
+				9F011A012ADD000000000002 /* IntelTelemetry.swift */,
 				9A2848042666AB2F00EC1F6D /* Charts.swift */,
 				9A2848032666AB2F00EC1F6D /* SystemKit.swift */,
 				9A2848072666AB3000EC1F6D /* Updater.swift */,
@@ -2044,6 +2050,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				9A6CFC0122A1C9F5001E782D /* Assets.xcassets in Resources */,
+				9F011A012ADD000000000003 /* intel-cpu-samples.rb in Resources */,
 				5E8E7354308E1D1100126136 /* Stats.icon in Resources */,
 				9A9B25BB24F7DE2B00C3CCE6 /* Localizable.strings in Resources */,
 			);
@@ -2303,6 +2310,7 @@
 				9A9B8C9D27149A3700218374 /* Tachometer.swift in Sources */,
 				9A2847652666AA2700EC1F6D /* Memory.swift in Sources */,
 				9A2847642666AA2700EC1F6D /* Battery.swift in Sources */,
+				9F011A012ADD000000000001 /* IntelTelemetry.swift in Sources */,
 				9A28480B2666AB3000EC1F6D /* Charts.swift in Sources */,
 				9A2847632666AA2700EC1F6D /* Mini.swift in Sources */,
 				5E828A003074086000DB0CA0 /* Icon.swift in Sources */,

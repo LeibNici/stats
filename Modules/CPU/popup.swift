@@ -18,7 +18,7 @@ internal class Popup: PopupWrapper {
     private let chartHeight: CGFloat = 120 + Constants.Popup.separatorHeight + Constants.Popup.spacing*2
     private var detailsHeight: CGFloat {
         get {
-            var count: CGFloat = isARM ? 4 : 6
+            var count: CGFloat = isARM ? 4 : 11
             if SystemKit.shared.device.info.cpu?.eCores != nil {
                 count += 1
             }
@@ -52,8 +52,6 @@ internal class Popup: PopupWrapper {
     private var systemField: NSTextField? = nil
     private var userField: NSTextField? = nil
     private var idleField: NSTextField? = nil
-    private var shedulerLimitField: NSTextField? = nil
-    private var speedLimitField: NSTextField? = nil
     private var eCoresField: NSTextField? = nil
     private var pCoresField: NSTextField? = nil
     private var sCoresField: NSTextField? = nil
@@ -89,7 +87,24 @@ internal class Popup: PopupWrapper {
     private let loadCache = PopupCache<CPU_Load>()
     private let temperatureCache = PopupCache<Double>()
     private let frequencyCache = PopupCache<CPU_Frequency>()
-    private let limitCache = PopupCache<CPU_Limit>()
+    private let intelCache = PopupCache<IntelCPUDetails>()
+    private let intelHistory = TelemetryHistory()
+    private var intelChart: TelemetryChartView?
+    private var intelFields: [String: NSTextField] = [:]
+    private var intelCoreText: NSTextField?
+    private var lastFrequencyDate: Date?
+
+    private var logicalCount: Int { Int(sysctlByName("hw.logicalcpu")) }
+    private var physicalCount: Int { Int(sysctlByName("hw.physicalcpu")) }
+    private let intelMetrics = [
+        ("Average frequency", "MHz"), ("CPU temperature", "°C"), ("CPU package power", "W"),
+        ("Scheduler limit", "%"), ("Speed limit", "%"), ("Available logical CPUs", ""),
+        ("Frequency headroom limited", "MHz")
+    ]
+    private func threadName(_ id: Int) -> String { "\(localizedString("Logical thread")) \(id + 1)" }
+    private func coreThreadName(_ core: Int, _ thread: Int) -> String {
+        "\(localizedString("Physical core")) \(core) · \(localizedString("SMT")) \(thread + 1)"
+    }
     private let averageCache = PopupCache<CPU_AverageLoad>()
     
     private var processes: ProcessesView? = nil
@@ -160,7 +175,11 @@ internal class Popup: PopupWrapper {
         self.addArrangedSubview(self.initDetails())
         self.addArrangedSubview(self.initAverage())
         self.addArrangedSubview(self.initProcesses())
-        self.replay(self.frequencyCache, render: self.renderFrequency)
+        if isARM {
+            self.replay(self.frequencyCache, render: self.renderFrequency)
+        } else {
+            self.insertArrangedSubview(self.initIntelFrequency(), at: 4)
+        }
         
         self.recalculateHeight()
     }
@@ -169,8 +188,9 @@ internal class Popup: PopupWrapper {
         self.systemField = nil
         self.userField = nil
         self.idleField = nil
-        self.shedulerLimitField = nil
-        self.speedLimitField = nil
+        self.intelFields.removeAll()
+        self.intelCoreText = nil
+        self.intelChart = nil
         self.eCoresField = nil
         self.pCoresField = nil
         self.sCoresField = nil
@@ -213,7 +233,7 @@ internal class Popup: PopupWrapper {
         self.replay(self.loadCache, render: self.renderLoad)
         self.replay(self.temperatureCache, render: self.renderTemperature)
         self.replay(self.frequencyCache, render: self.renderFrequency)
-        self.replay(self.limitCache, render: self.renderLimit)
+        self.replay(self.intelCache, render: self.renderIntel)
         self.replay(self.averageCache, render: self.renderAverage)
         self.replay(self.processCache, render: self.renderProcesses)
     }
@@ -295,7 +315,7 @@ internal class Popup: PopupWrapper {
         view.addArrangedSubview(separator)
         view.addArrangedSubview(lineChartContainer)
         
-        if let cores = SystemKit.shared.device.info.cpu?.logicalCores {
+        if let cores = isARM ? SystemKit.shared.device.info.cpu?.logicalCores.map(Int.init) : self.logicalCount, cores > 0 {
             let barChartContainer: NSView = {
                 let box: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 50))
                 box.heightAnchor.constraint(equalToConstant: box.frame.height).isActive = true
@@ -308,13 +328,16 @@ internal class Popup: PopupWrapper {
                     y: Constants.Popup.spacing,
                     width: view.frame.width - (Constants.Popup.spacing*2),
                     height: box.frame.height - (Constants.Popup.spacing*2)
-                ), num: Int(cores))
+                ), num: cores)
                 self.columnChart = chart
                 
                 box.addSubview(chart)
                 
                 return box
             }()
+            if !isARM {
+                view.addArrangedSubview(separatorView(localizedString("Logical thread usage"), origin: .zero, width: self.frame.width))
+            }
             view.addArrangedSubview(barChartContainer)
         }
         
@@ -337,10 +360,14 @@ internal class Popup: PopupWrapper {
         (self.idleColorView, _, self.idleField) = popupWithColorRow(container, color: self.idleColor.withAlphaComponent(0.5), title: "\(localizedString("Idle")):", value: "")
         
         if !isARM {
-            self.shedulerLimitField = popupRow(container, title: "\(localizedString("Scheduler limit")):", value: "").1
-            self.speedLimitField = popupRow(container, title: "\(localizedString("Speed limit")):", value: "").1
+            for (name, _) in self.intelMetrics.dropFirst() {
+                self.intelFields[name] = popupRow(container, title: localizedString(name), value: localizedString("Unavailable")).1
+            }
+            self.intelFields["Reported limit reasons"] = popupRow(
+                container, title: localizedString("Reported limit reasons"), value: localizedString("Unavailable")
+            ).1
         }
-        
+
         if SystemKit.shared.device.info.cpu?.eCores != nil {
             (self.eCoresColorView, _, self.eCoresField) = popupWithColorRow(container, color: self.eCoresColor, title: "\(localizedString("Efficiency cores")):", value: "")
         }
@@ -378,6 +405,50 @@ internal class Popup: PopupWrapper {
         return view
     }
     
+    private func initIntelFrequency() -> NSView {
+        let view = NSStackView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 0))
+        view.orientation = .vertical
+        view.spacing = 0
+        view.addArrangedSubview(separatorView(localizedString("Frequency"), origin: .zero, width: self.frame.width))
+        self.intelFields["Average frequency"] = popupRow(
+            view, title: localizedString("Average frequency"), value: localizedString("Unavailable")
+        ).1
+        view.addArrangedSubview(separatorView(localizedString("Physical cores · SMT frequency averages"), origin: .zero, width: self.frame.width))
+
+        let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 72))
+        scroller.heightAnchor.constraint(equalToConstant: 72).isActive = true
+        scroller.hasVerticalScroller = true
+        scroller.drawsBackground = false
+        let text = NSTextField(wrappingLabelWithString: localizedString("Unavailable"))
+        text.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width - 12, height: 72))
+        document.addSubview(text)
+        text.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            text.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 7),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor),
+            text.topAnchor.constraint(equalTo: document.topAnchor, constant: 3)
+        ])
+        scroller.documentView = document
+        self.intelCoreText = text
+        view.addArrangedSubview(scroller)
+
+        let threads = self.physicalCount > 0 ? self.logicalCount / self.physicalCount : 0
+        var metrics = self.intelMetrics.map { (localizedString($0.0), $0.1) }
+        for core in 0..<self.physicalCount {
+            for thread in 0..<threads {
+                metrics.append((self.coreThreadName(core, thread), "MHz"))
+            }
+        }
+        for thread in 0..<self.logicalCount {
+            metrics.append((self.threadName(thread), "%"))
+        }
+        let chart = TelemetryChartView(width: self.frame.width, metrics: metrics, history: self.intelHistory)
+        self.intelChart = chart
+        view.addArrangedSubview(chart)
+        return view
+    }
+
     private func initFrequency() -> NSView {
         let view: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: self.frequencyHeight))
         view.heightAnchor.constraint(equalToConstant: view.bounds.height).isActive = true
@@ -436,6 +507,12 @@ internal class Popup: PopupWrapper {
             let sample = DoubleValue(value.totalUsage, at: date)
             self.chartHistory.append(sample)
             self.lineChart?.historyUpdated()
+            if let logical = value.logicalUsage {
+                for (index, usage) in logical.enumerated() {
+                    self.intelHistory.append(self.threadName(index), usage.map { $0 * 100 }, at: date)
+                }
+                self.intelChart?.historyUpdated()
+            }
         }
     }
     
@@ -475,7 +552,12 @@ internal class Popup: PopupWrapper {
                 usagePerCore.append(ColorValue(value.usagePerCore[i], color: NSColor.systemBlue))
             }
         }
-        self.columnChart?.setValues(usagePerCore)
+        if isARM {
+            self.columnChart?.setValues(usagePerCore)
+        } else {
+            let logical = value.logicalUsage ?? [Double?](repeating: nil, count: self.logicalCount)
+            self.columnChart?.setOptionalValues(logical, label: localizedString("Logical thread"))
+        }
         self.columnChart?.display()
         
         self.lineChart?.display()
@@ -564,16 +646,73 @@ internal class Popup: PopupWrapper {
         })
     }
     
-    public func limitCallback(_ value: CPU_Limit?) {
-        guard let value else { return }
-        self.apply(value, to: self.limitCache, render: self.renderLimit)
+    public func intelCallback(_ value: IntelCPUDetails) {
+        self.apply(value, to: self.intelCache, render: self.renderIntel)
+        DispatchQueue.main.async {
+            let date = Date()
+            let sampled = value.frequencyDate != nil && value.frequencyDate != self.lastFrequencyDate
+            let values: [Double?] = [
+                value.averageMHz, value.temperature, value.packageWatts, value.scheduler.map(Double.init),
+                value.speed.map(Double.init), value.cpus.map(Double.init), value.headroomMHz
+            ]
+            for (index, metric) in self.intelMetrics.enumerated() {
+                if (index == 0 || index == 6) && !sampled { continue }
+                self.intelHistory.append(localizedString(metric.0), values[index], at: date)
+            }
+            if sampled {
+                self.lastFrequencyDate = value.frequencyDate
+                for (core, threads) in value.coreThreadMHz.enumerated() {
+                    for (thread, mhz) in threads.enumerated() {
+                        self.intelHistory.append(self.coreThreadName(core, thread), mhz, at: date)
+                    }
+                }
+            }
+            self.intelChart?.historyUpdated()
+        }
     }
-    
-    private func renderLimit(_ value: CPU_Limit) {
-        self.shedulerLimitField?.stringValue = "\(value.scheduler)%"
-        self.speedLimitField?.stringValue = "\(value.speed)%"
+
+    private func renderIntel(_ value: IntelCPUDetails) {
+        let unavailable = localizedString("Unavailable")
+        let values = [
+            value.averageMHz.map { "\(Int($0.rounded())) MHz" },
+            value.temperature.map { temperature($0) },
+            value.packageWatts.map { String(format: "%.1f W", $0) },
+            value.scheduler.map { "\($0)%" }, value.speed.map { "\($0)%" },
+            value.cpus.map { "\($0)" }, value.headroomMHz.map { "\(Int($0.rounded())) MHz" }
+        ]
+        for (index, metric) in self.intelMetrics.enumerated() {
+            self.intelFields[metric.0]?.stringValue = values[index] ?? unavailable
+        }
+        let reasons = value.limitReasons.isEmpty ? nil : value.limitReasons.joined(separator: ", ")
+        self.intelFields["Reported limit reasons"]?.stringValue = reasons ?? unavailable
+        self.intelFields["Reported limit reasons"]?.toolTip = reasons
+        self.intelFields["CPU package power"]?.toolTip = value.packageWatts.map { _ in
+            value.powerFromSMC ? "SMC PCPT" : "powermetrics"
+        }
+        if let temp = value.temperature {
+            self.renderTemperature(temp)
+        } else {
+            self.temperatureCircle?.isHidden = true
+        }
+        self.frequencyCircle?.isHidden = value.averageMHz == nil
+        if let mhz = value.averageMHz {
+            self.frequencyCircle?.setText(String(format: "%.2f GHz", mhz / 1000))
+            self.frequencyCircle?.toolTip = values[0]
+        }
+
+        let coreText = (0..<self.physicalCount).map { index -> String in
+            let threads = value.coreThreadMHz.indices.contains(index) ? value.coreThreadMHz[index] : []
+            let reading = threads.map { String(format: "%.1f", $0) }.joined(separator: " / ")
+            return "\(localizedString("Core")) \(index)   \(threads.isEmpty ? unavailable : reading + " MHz")"
+        }.joined(separator: "\n")
+        self.intelCoreText?.stringValue = coreText.isEmpty ? unavailable : coreText
+        if let text = self.intelCoreText, let document = text.superview {
+            let width = max(1, document.bounds.width - 10)
+            let size = text.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 1000)) ?? .zero
+            document.setFrameSize(NSSize(width: document.frame.width, height: max(72, size.height + 6)))
+        }
     }
-    
+
     public func averageCallback(_ value: CPU_AverageLoad?) {
         guard let value else { return }
         self.apply(value, to: self.averageCache, render: self.renderAverage)

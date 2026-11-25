@@ -12,27 +12,9 @@
 import Cocoa
 import Kit
 
-var textWidgetHelp = """
-<h2>Description</h2>
-You can use a combination of any of the variables.
-<h3>Examples:</h3>
-<ul>
-<li>$usage - $fps</li>
-<li>GPU: $usage ($temperature)</li>
-<li>Render: $render, Tiler: $tiler</li>
-</ul>
-<h2>Available variables</h2>
-<ul>
-<li><b>$usage</b>: <small>GPU utilization.</small></li>
-<li><b>$render</b>: <small>Renderer utilization.</small></li>
-<li><b>$tiler</b>: <small>Tiler utilization.</small></li>
-<li><b>$ane</b>: <small>Apple Neural Engine utilization.</small></li>
-<li><b>$memory</b>: <small>GPU memory usage.</small></li>
-<li><b>$fps</b>: <small>Frames per second.</small></li>
-</ul>
-"""
+internal let gpuDefaultText = isARM ? "$usage - $fps" : "$usage · $temperature"
 
-internal class Settings: NSStackView, Settings_v {
+internal class Settings: NSStackView, Settings_v, NSTextFieldDelegate {
     private var updateIntervalValue: Int = 1
     private var updateTopIntervalValue: Int = 1
     private var numberOfProcesses: Int = 8
@@ -109,6 +91,18 @@ internal class Settings: NSStackView, Settings_v {
         }
         #endif
         
+        if widgets.contains(.text) {
+            let field = NSTextField(string: Store.shared.string(key: "GPU_textWidgetValue", defaultValue: gpuDefaultText))
+            field.usesSingleLineMode = true
+            field.widthAnchor.constraint(equalToConstant: 230).isActive = true
+            field.delegate = self
+            field.toolTip = isARM ? "$usage $render $tiler $ane $memory $fps" :
+                "$usage $temperature $core $memclock $fan $power $memory"
+            self.addArrangedSubview(PreferencesSection([
+                PreferencesRow(localizedString("Text widget value"), component: field)
+            ]))
+        }
+
         self.button = self.selectView(
             action: #selector(self.handleSelection),
             items: [],
@@ -119,6 +113,11 @@ internal class Settings: NSStackView, Settings_v {
         ]))
     }
     
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        Store.shared.set(key: "GPU_textWidgetValue", value: field.stringValue)
+    }
+
     internal func setList(_ gpus: GPUs) {
         var list: [KeyValue_t] = [
             KeyValue_t(key: "automatic", value: "Automatic"),

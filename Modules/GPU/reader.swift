@@ -42,6 +42,7 @@ private func maxANEPower(for platform: Platform?) -> Double {
 
 internal class InfoReader: Reader<GPUs> {
     private var gpus: GPUs = GPUs()
+    private let readLock = NSLock()
     private var displays: [gpu_s] = []
     private var devices: [device] = []
     
@@ -100,9 +101,19 @@ internal class InfoReader: Reader<GPUs> {
     }
     
     public override func read() {
-        guard let accelerators = fetchIOService(kIOAcceleratorClassName) else {
+        self.readLock.lock()
+        defer { self.readLock.unlock() }
+        #if arch(x86_64)
+        guard let snapshot = Self.intelAccelerators() else {
+            self.callback(GPUs())
             return
         }
+        let accelerators = snapshot.other
+        self.gpus = GPUs()
+        self.gpus.list = snapshot.amd
+        #else
+        guard let accelerators = fetchIOService(kIOAcceleratorClassName) else { return }
+        #endif
         var devices = self.devices
         
         for (index, accelerator) in accelerators.enumerated() {
@@ -173,6 +184,9 @@ internal class InfoReader: Reader<GPUs> {
                 model = model.removedRegexMatches(pattern: v, replaceWith: "").trimmingCharacters(in: .whitespacesAndNewlines)
             }
             
+            #if arch(x86_64)
+            if id.isEmpty { id = "\(IOClass) #\(index)" }
+            #endif
             if !self.gpus.list.contains(where: { $0.id == id }) {
                 self.gpus.list.append(GPU_Info(
                     id: id,
@@ -218,7 +232,7 @@ internal class InfoReader: Reader<GPUs> {
         let aneUtil = anePower.map { min(1.0, max(0.0, $0 / self.aneMaxPower)) }
         let fpsValue = self.readFrames()
         for i in self.gpus.list.indices where self.gpus.list[i].IOClass.lowercased().contains("agx") {
-            self.gpus.list[i].aneUtilization = aneUtil ?? 0
+            self.gpus.list[i].aneUtilization = aneUtil
             self.gpus.list[i].fps = fpsValue
         }
         #endif
@@ -227,6 +241,80 @@ internal class InfoReader: Reader<GPUs> {
         self.callback(self.gpus)
     }
     
+    #if arch(x86_64)
+    private struct AMDDevice {
+        let model: String
+        let memoryLimit: Double?
+        var external = false
+        var online = false
+        var nodes: [(id: UInt64, stats: [String: Any])] = []
+    }
+
+    internal static func intelAccelerators() -> (amd: [GPU_Info], other: [NSDictionary])? {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(kIOAcceleratorClassName), &iterator) == kIOReturnSuccess else { return nil }
+        defer { IOObjectRelease(iterator) }
+        var devices: [UInt64: AMDDevice] = [:]
+        var other: [NSDictionary] = []
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            defer { IOObjectRelease(service) }
+            guard let properties = getIOProperties(service) else { continue }
+            guard let ioClass = properties["IOClass"] as? String, ioClass.lowercased().contains("amd"),
+                  let pci = Self.pciAncestor(service) else {
+                other.append(properties)
+                continue
+            }
+            var nodeID: UInt64 = 0
+            guard IORegistryEntryGetRegistryEntryID(service, &nodeID) == kIOReturnSuccess else { continue }
+            let poweredOff = (properties["AGCInfo"] as? [String: Int])?["poweredOffByAGC"] ?? 0
+            var device = devices[pci.id] ?? AMDDevice(model: pci.model, memoryLimit: pci.memory)
+            device.external = device.external || (properties["Removable"] as? NSNumber)?.boolValue == true
+            device.online = device.online || poweredOff == 0
+            if poweredOff == 0, let stats = properties["PerformanceStatistics"] as? [String: Any] {
+                device.nodes.append((nodeID, stats))
+            }
+            devices[pci.id] = device
+        }
+        guard IOIteratorIsValid(iterator) != 0 else { return nil }
+        let amd = devices.keys.sorted().compactMap { id -> GPU_Info? in
+            guard let device = devices[id] else { return nil }
+            let metrics = AMDGPUStatistics.merge(device.nodes)
+            var gpu = GPU_Info(id: "pci-\(id)", type: device.external ? GPU_types.external.rawValue : GPU_types.discrete.rawValue,
+                               IOClass: "AMD", model: device.model, utilization: metrics.utilization)
+            gpu.state = device.online
+            gpu.temperature = metrics.temperature
+            gpu.coreMHz = metrics.coreMHz
+            gpu.memoryMHz = metrics.memoryMHz
+            gpu.fanRPM = metrics.fanRPM
+            gpu.driverWatts = metrics.watts
+            gpu.memory = metrics.memoryBytes
+            gpu.memoryLimit = device.memoryLimit
+            return gpu
+        }
+        return (amd, other)
+    }
+
+    private static func pciAncestor(_ service: io_registry_entry_t) -> (id: UInt64, model: String, memory: Double?)? {
+        var current = service
+        IOObjectRetain(current)
+        defer { IOObjectRelease(current) }
+        while IOObjectConformsTo(current, "IOPCIDevice") == 0 {
+            var parent: io_registry_entry_t = 0
+            guard IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) == kIOReturnSuccess else { return nil }
+            IOObjectRelease(current)
+            current = parent
+        }
+        var id: UInt64 = 0
+        guard IORegistryEntryGetRegistryEntryID(current, &id) == kIOReturnSuccess else { return nil }
+        let props = getIOProperties(current)
+        let model = (props?["model"] as? Data).flatMap { data in
+            String(data: data.prefix { $0 != 0 }, encoding: .utf8)
+        } ?? props?["model"] as? String
+        let name = model?.replacingOccurrences(of: "AMD ", with: "", options: .anchored) ?? "AMD Graphics"
+        return (id, name, AMDGPUStatistics.memoryCapacity(props?["VRAM,totalMB"]))
+    }
+    #endif
+
     // MARK: - FPS
     
     private func setupFrames() {
@@ -261,6 +349,7 @@ internal class InfoReader: Reader<GPUs> {
         let items = channelsList as CFArray
         
         var total: Int64 = 0
+        var found = false
         for i in 0..<CFArrayGetCount(items) {
             let item = unsafeBitCast(CFArrayGetValueAtIndex(items, i), to: CFDictionary.self)
             guard let group = IOReportChannelGetGroup(item)?.takeUnretainedValue() as? String,
@@ -268,6 +357,11 @@ internal class InfoReader: Reader<GPUs> {
                   let sub = IOReportChannelGetSubGroup(item)?.takeUnretainedValue() as? String,
                   sub == "swap" else { continue }
             total += IOReportSimpleGetIntegerValue(item, 0)
+            found = true
+        }
+        guard found else {
+            self.previousFramesTime = 0
+            return nil
         }
         
         let now = CFAbsoluteTimeGetCurrent()
@@ -345,9 +439,9 @@ internal class InfoReader: Reader<GPUs> {
             self.previousANERead = now
         }
         
-        guard let previousRead = self.previousANERead else { return 0 }
+        guard let previousRead = self.previousANERead, currentEnergy >= self.previousANEEnergy else { return nil }
         let elapsed = now.timeIntervalSince(previousRead)
-        guard elapsed > 0 else { return 0 }
+        guard elapsed > 0 else { return nil }
         return (currentEnergy - self.previousANEEnergy) / elapsed
     }
 }

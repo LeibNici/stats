@@ -39,6 +39,28 @@ public struct GPU_Info: Codable {
     
     public var memory: Double? = nil
     public var memoryLimit: Double? = nil
+    public var temperature: Double? = nil
+    public var coreMHz: Double? = nil
+    public var memoryMHz: Double? = nil
+    public var fanRPM: Double? = nil
+    public var driverWatts: Double? = nil
+
+    internal func text(for key: String) -> String? {
+        switch key {
+        case "$usage": return self.utilization.map { "\(Int(($0 * 100).rounded()))%" }
+        case "$render": return self.renderUtilization.map { "\(Int(($0 * 100).rounded()))%" }
+        case "$tiler": return self.tilerUtilization.map { "\(Int(($0 * 100).rounded()))%" }
+        case "$ane": return self.aneUtilization.map { "\(Int(($0 * 100).rounded()))%" }
+        case "$memory": return self.memory.map { Units(bytes: Int64($0)).getReadableMemory(style: .memory) }
+        case "$fps": return self.fps.map { "\(Int($0.rounded()))" }
+        case "$temperature": return self.temperature.map { Kit.temperature($0) }
+        case "$core": return self.coreMHz.map { "\(Int($0.rounded())) MHz" }
+        case "$memclock": return self.memoryMHz.map { "\(Int($0.rounded())) MHz" }
+        case "$fan": return self.fanRPM.map { "\(Int($0.rounded())) RPM" }
+        case "$power": return self.driverWatts.map { String(format: "%.1f W", $0) }
+        default: return nil
+        }
+    }
     
     init(id: String, type: GPU_type, IOClass: String, model: String, utilization: Double? = nil, render: Double? = nil, tiler: Double? = nil) {
         self.id = id
@@ -85,7 +107,8 @@ public class GPUs: Codable, RemoteType {
     init() {}
     
     internal func active() -> [GPU_Info] {
-        return self.list.filter{ $0.state && $0.utilization != nil }.sorted{ $0.utilization ?? 0 > $1.utilization ?? 0 }
+        return self.list.filter { $0.state && ($0.utilization != nil || $0.IOClass == "AMD") }
+            .sorted { ($0.utilization ?? -1) > ($1.utilization ?? -1) }
     }
     
     public func remote() -> String? {
@@ -120,7 +143,7 @@ public class GPU: Module {
     }
     
     private var textValue: String {
-        Store.shared.string(key: "\(self.name)_textWidgetValue", defaultValue: "$usage - $fps")
+        Store.shared.string(key: "\(self.name)_textWidgetValue", defaultValue: gpuDefaultText)
     }
     
     public init() {
@@ -177,7 +200,8 @@ public class GPU: Module {
     }
     
     private func infoCallback(_ raw: GPUs?) {
-        guard let value = raw, !value.list.isEmpty, self.enabled else {
+        guard self.enabled else { return }
+        guard let value = raw else {
             self.summaryCallback(nil)
             return
         }
@@ -185,60 +209,44 @@ public class GPU: Module {
         self.settingsView.setList(value)
         
         let activeGPUs = value.active()
-        guard let activeGPU = activeGPUs.first(where: { $0.state }) ?? activeGPUs.first else {
-            self.summaryCallback(nil)
-            return
-        }
-        let selectedGPU: GPU_Info = activeGPUs.first{ $0.model == self.selectedGPU } ?? activeGPU
-        guard let utilization = selectedGPU.utilization else {
-            self.summaryCallback(nil)
-            return
-        }
+        let selectedGPU = activeGPUs.first { $0.model == self.selectedGPU } ?? activeGPUs.first
+        let utilization = selectedGPU?.utilization
         self.summaryCallback(utilization)
-        
-        self.popupView.loadCallback(selectedGPU)
-        self.portalView.callback(selectedGPU)
-        self.notificationsView.usageCallback(utilization)
-        self.previewView.loadCallback(selectedGPU)
-        
-        self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
+
+        if let selectedGPU {
+            self.popupView.loadCallback(selectedGPU)
+            self.portalView.callback(selectedGPU)
+            self.previewView.loadCallback(selectedGPU)
+        } else if !isARM {
+            self.popupView.loadCallback(GPU_Info(id: "", type: "", IOClass: "", model: ""))
+        }
+        if let utilization { self.notificationsView.usageCallback(utilization) }
+
+        self.menuBar.widgets.filter { $0.isActive }.forEach { w in
+            if let widget = w.item as? TextWidget {
+                let text = self.textValue
+                var rendered = text
+                for pair in TextWidget.parseText(text).sorted(by: { $0.key.count > $1.key.count }) {
+                    let key = pair.value.isEmpty ? pair.key : "\(pair.key).\(pair.value)"
+                    let replacement = selectedGPU?.text(for: pair.key) ?? "—"
+                    rendered = rendered.replacingOccurrences(of: key, with: replacement)
+                }
+                widget.setValue(rendered)
+                return
+            }
+            guard let selectedGPU, let utilization else { return }
             switch w.item {
             case let widget as Mini:
                 widget.setValue(utilization)
                 widget.setTitle(self.showType ? "\(selectedGPU.type)GPU" : nil)
             case let widget as LineChart: widget.setValue(utilization)
             case let widget as BarChart: widget.setValue([[ColorValue(utilization)]])
-            case let widget as Tachometer:
-                widget.setValue([
-                    ColorValue(utilization, color: NSColor.systemBlue)
-                ])
-            case let widget as TextWidget:
-                var text = "\(self.textValue)"
-                let pairs = TextWidget.parseText(text)
-                pairs.forEach { pair in
-                    var replacement: String? = nil
-                    
-                    switch pair.key {
-                    case "$usage": replacement = "\(Int(utilization*100))%"
-                    case "$render": replacement = "\(Int((selectedGPU.renderUtilization ?? 0)*100))%"
-                    case "$tiler": replacement = "\(Int((selectedGPU.tilerUtilization ?? 0)*100))%"
-                    case "$ane": replacement = "\(Int((selectedGPU.aneUtilization ?? 0)*100))%"
-                    case "$memory": replacement = Units(bytes: Int64(selectedGPU.memory ?? 0)).getReadableMemory(style: .memory)
-                    case "$fps": replacement = "\(Int((selectedGPU.fps ?? 0).rounded()))"
-                    default: return
-                    }
-                    
-                    if let replacement {
-                        let key = pair.value.isEmpty ? pair.key : "\(pair.key).\(pair.value)"
-                        text = text.replacingOccurrences(of: key, with: replacement)
-                    }
-                }
-                widget.setValue(text)
+            case let widget as Tachometer: widget.setValue([ColorValue(utilization, color: NSColor.systemBlue)])
             default: break
             }
         }
-        
-        if self.systemWidgetsUpdatesState {
+
+        if self.systemWidgetsUpdatesState, let selectedGPU {
             SystemWidgetUpdates.shared.update(selectedGPU, key: "GPU@InfoReader", kinds: [GPU_entry.kind, "UnitedWidget"], defaults: self.userDefaults)
         }
     }

@@ -16,7 +16,17 @@ internal class Popup: PopupWrapper {
     private let chartHistory = LineChartData(capacity: 180)
     private let dashboardHeight: CGFloat = 90
     private let chartHeight: CGFloat = 90 + Constants.Popup.separatorHeight
-    private let detailsHeight: CGFloat = (22*4) + Constants.Popup.separatorHeight
+    private var detailsHeight: CGFloat { (isARM ? 22 * 4 : 22 * 7) + Constants.Popup.separatorHeight }
+    private let amdMetrics = [
+        ("Utilization", "$usage", "%"), ("Temperature", "$temperature", "°C"),
+        ("Core clock", "$core", "MHz"), ("Memory clock", "$memclock", "MHz"),
+        ("Fan speed", "$fan", "RPM"), ("Driver power", "$power", "W"), ("VRAM used", "$memory", "MiB")
+    ]
+    private var amdFields: [NSTextField] = []
+    private var amdHistory = TelemetryHistory()
+    private var amdChart: TelemetryChartView?
+    private var amdDeviceID: String?
+    private var amdHistoryContainer: NSStackView?
     
     private let loadCache = PopupCache<GPU_Info>()
     private let processesCache = PopupCache<[TopProcess]>()
@@ -59,9 +69,16 @@ internal class Popup: PopupWrapper {
     
     public override func loadContent() {
         self.addArrangedSubview(self.initDashboard())
-        self.addArrangedSubview(self.initChart())
+        if isARM { self.addArrangedSubview(self.initChart()) }
         self.addArrangedSubview(self.initDetails())
         self.addArrangedSubview(self.initProcesses())
+        if !isARM {
+            let container = NSStackView()
+            container.orientation = .vertical
+            self.amdHistoryContainer = container
+            self.addArrangedSubview(container)
+            self.installAMDChart()
+        }
         
         self.recalculateHeight()
     }
@@ -77,6 +94,9 @@ internal class Popup: PopupWrapper {
         self.aneField = nil
         self.memoryField = nil
         self.fpsField = nil
+        self.amdFields.removeAll()
+        self.amdChart = nil
+        self.amdHistoryContainer = nil
     }
     
     required init?(coder: NSCoder) {
@@ -97,7 +117,7 @@ internal class Popup: PopupWrapper {
     }
     
     private func recalculateHeight() {
-        let h = self.dashboardHeight + self.chartHeight + self.detailsHeight + self.processesHeight
+        let h = self.dashboardHeight + self.detailsHeight + self.processesHeight + (isARM ? self.chartHeight : 96)
         if self.frame.size.height != h {
             self.setFrameSize(NSSize(width: self.frame.width, height: h))
             self.sizeCallback?(self.frame.size)
@@ -119,12 +139,18 @@ internal class Popup: PopupWrapper {
         self.usageCircle!.toolTip = localizedString("Utilization")
         usage.addSubview(self.usageCircle!)
         
-        self.aneCircle = PieChartView(frame: NSRect(x: 0, y: 0, width: render.frame.width, height: render.frame.height), drawValue: true)
-        self.aneCircle!.toolTip = localizedString("ANE utilization")
-        render.addSubview(self.aneCircle!)
+        if isARM {
+            self.aneCircle = PieChartView(frame: render.bounds, drawValue: true)
+            self.aneCircle!.toolTip = localizedString("ANE utilization")
+            render.addSubview(self.aneCircle!)
+        } else {
+            self.usageCircle?.isHidden = true
+            self.memoryCircle?.isHidden = true
+        }
         
         self.memoryCircle = PieChartView(frame: NSRect(x: 0, y: 0, width: tiler.frame.width, height: tiler.frame.height), drawValue: true)
         self.memoryCircle!.toolTip = localizedString("Memory usage")
+        self.memoryCircle?.isHidden = !isARM
         tiler.addSubview(self.memoryCircle!)
         
         view.addSubview(render)
@@ -161,11 +187,17 @@ internal class Popup: PopupWrapper {
         container.orientation = .vertical
         container.spacing = 0
         
-        self.utilizationField = popupRow(container, title: "\(localizedString("Utilization")):", value: "").1
-        self.aneField = popupRow(container, title: "\(localizedString("ANE utilization")):", value: "").1
-        self.memoryField = popupRow(container, title: "\(localizedString("Memory usage")):", value: "").1
-        self.fpsField = popupRow(container, title: "\("FPS"):", value: "").1
-        
+        if isARM {
+            self.utilizationField = popupRow(container, title: localizedString("Utilization"), value: "").1
+            self.aneField = popupRow(container, title: localizedString("ANE utilization"), value: "").1
+            self.memoryField = popupRow(container, title: localizedString("Memory usage"), value: "").1
+            self.fpsField = popupRow(container, title: "FPS", value: "").1
+        } else {
+            self.amdFields = self.amdMetrics.map {
+                popupRow(container, title: localizedString($0.0), value: localizedString("Unavailable")).1
+            }
+        }
+
         view.addSubview(separator)
         view.addSubview(container)
         
@@ -229,11 +261,33 @@ internal class Popup: PopupWrapper {
         self.recalculateHeight()
     }
     
+    private func installAMDChart() {
+        guard let container = self.amdHistoryContainer else { return }
+        self.amdChart?.removeFromSuperview()
+        let chart = TelemetryChartView(width: self.frame.width, metrics: self.amdMetrics.map {
+            (localizedString($0.0), $0.2)
+        }, history: self.amdHistory)
+        self.amdChart = chart
+        container.addArrangedSubview(chart)
+    }
+
     public func loadCallback(_ value: GPU_Info) {
         let date = Date()
         self.apply(value, to: self.loadCache, render: self.renderLoad)
         DispatchQueue.main.async {
-            if let utilization = value.utilization {
+            if !isARM {
+                if !value.id.isEmpty, self.amdDeviceID != value.id {
+                    self.amdDeviceID = value.id
+                    self.amdHistory = TelemetryHistory()
+                    self.installAMDChart()
+                }
+                let readings = [value.utilization.map { $0 * 100 }, value.temperature, value.coreMHz,
+                                value.memoryMHz, value.fanRPM, value.driverWatts, value.memory.map { $0 / 1_048_576 }]
+                for (index, metric) in self.amdMetrics.enumerated() {
+                    self.amdHistory.append(localizedString(metric.0), readings[index], at: date)
+                }
+                self.amdChart?.historyUpdated()
+            } else if let utilization = value.utilization {
                 let sample = DoubleValue(utilization, at: date)
                 self.chartHistory.append(sample)
                 self.chart?.historyUpdated()
@@ -242,6 +296,19 @@ internal class Popup: PopupWrapper {
     }
     
     private func renderLoad(_ value: GPU_Info) {
+        if !isARM {
+            self.usageCircle?.isHidden = value.utilization == nil
+            for (index, metric) in self.amdMetrics.enumerated() where self.amdFields.indices.contains(index) {
+                self.amdFields[index].stringValue = value.text(for: metric.1) ?? localizedString("Unavailable")
+            }
+            if let bytes = value.memory, let limit = value.memoryLimit, limit > 0 {
+                self.memoryCircle?.isHidden = false
+                self.memoryCircle?.setValue(min(bytes / limit, 1))
+                self.memoryCircle?.toolTip = value.text(for: "$memory")
+            } else {
+                self.memoryCircle?.isHidden = true
+            }
+        }
         if let utilization = value.utilization {
             self.usageCircle?.toolTip = "\(localizedString("GPU utilization")): \(Int(utilization.rounded(toPlaces: 2) * 100))%"
             self.usageCircle?.setValue(utilization)
@@ -254,7 +321,7 @@ internal class Popup: PopupWrapper {
             self.aneCircle?.display()
             self.aneField?.stringValue = "\(Int(utilization*100))%"
         }
-        if let v = value.memory {
+        if isARM, let v = value.memory {
             let str = Units(bytes: Int64(v)).getReadableMemory(style: .memory)
             self.memoryField?.stringValue = str
             
@@ -270,8 +337,12 @@ internal class Popup: PopupWrapper {
                 circle.display()
             }
         }
+        self.aneCircle?.isHidden = value.aneUtilization == nil
+        if value.aneUtilization == nil { self.aneField?.stringValue = localizedString("Unavailable") }
         if let fps = value.fps {
             self.fpsField?.stringValue = "\(Int(fps.rounded()))"
+        } else {
+            self.fpsField?.stringValue = localizedString("Unavailable")
         }
         
         self.chart?.display()

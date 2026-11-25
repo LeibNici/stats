@@ -1,0 +1,72 @@
+name: Build Stats for X99
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26-intel
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Test Intel telemetry
+        run: |
+          test "$(uname -m)" = x86_64
+          xcodebuild -version
+          xcrun swiftc Kit/plugins/IntelTelemetry.swift Tests/IntelTelemetryTests.swift -o "$RUNNER_TEMP/telemetry-tests"
+          "$RUNNER_TEMP/telemetry-tests"
+
+      - name: Build Intel app
+        run: |
+          xcodebuild -scheme Stats -configuration Release -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/StatsBuild" build \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO
+
+      - name: Check architecture and deployment targets
+        run: |
+          export STATS_APP="$RUNNER_TEMP/StatsBuild/Build/Products/Release/Stats.app"
+          test "$(plutil -extract LSMinimumSystemVersion raw "$STATS_APP/Contents/Info.plist")" = 12.0
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def run(*args):
+              return subprocess.check_output(args, text=True).strip()
+
+          app = Path(os.environ["STATS_APP"])
+          main = app / "Contents/MacOS/Stats"
+          widget = app / "Contents/PlugIns/WidgetsExtension.appex/Contents/MacOS/WidgetsExtension"
+          for required in (main, widget):
+              assert required.is_file() and os.access(required, os.X_OK), required
+
+          for path in app.rglob("*"):
+              if path.is_symlink() or not path.is_file() or "Mach-O" not in run("file", "-b", path):
+                  continue
+              assert run("xcrun", "lipo", "-archs", path) == "x86_64", path
+              commands = run("xcrun", "otool", "-l", path)
+              versions = re.findall(r"^\s*minos\s+([\d.]+)", commands, re.M)
+              if not versions:
+                  versions = re.findall(r"cmd LC_VERSION_MIN_MACOSX\s+cmdsize \d+\s+version ([\d.]+)", commands)
+              assert len(versions) == 1, (path, versions)
+              minimum = tuple(map(int, versions[0].split(".")))
+              assert minimum <= (15, 8, 3), (path, minimum)
+              if path == main:
+                  assert minimum == (12, 0), minimum
+              if path == widget:
+                  assert minimum == (14, 0), minimum
+              print(f"{path.relative_to(app)} x86_64 macOS {versions[0]}")
+          PY
+          ditto -c -k --sequesterRsrc --keepParent "$STATS_APP" "$RUNNER_TEMP/Stats-x86_64.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Stats-x86_64
+          path: ${{ runner.temp }}/Stats-x86_64.zip
+          if-no-files-found: error

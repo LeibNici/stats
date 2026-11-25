@@ -11,13 +11,13 @@
 
 import Cocoa
 import Kit
+import IOKit.pwr_mgt
 
 internal class LoadReader: Reader<CPU_Load> {
     private var cpuInfo: processor_info_array_t!
     private var prevCpuInfo: processor_info_array_t?
     private var numCpuInfo: mach_msg_type_number_t = 0
     private var numPrevCpuInfo: mach_msg_type_number_t = 0
-    private var numCPUs: uint = 0
     private let CPUUsageLock: NSLock = NSLock()
     private var previousInfo = host_cpu_load_info()
     private var hasHyperthreadingCores = false
@@ -29,13 +29,6 @@ internal class LoadReader: Reader<CPU_Load> {
     
     public override func setup() {
         self.hasHyperthreadingCores = sysctlByName("hw.physicalcpu") != sysctlByName("hw.logicalcpu")
-        [CTL_HW, HW_NCPU].withUnsafeBufferPointer { mib in
-            var sizeOfNumCPUs: size_t = MemoryLayout<uint>.size
-            let status = sysctl(processor_info_array_t(mutating: mib.baseAddress), 2, &self.numCPUs, &sizeOfNumCPUs, nil, 0)
-            if status != 0 {
-                self.numCPUs = 1
-            }
-        }
         self.cores = SystemKit.shared.device.info.cpu?.cores
     }
     
@@ -45,9 +38,12 @@ internal class LoadReader: Reader<CPU_Load> {
         let result: kern_return_t = host_processor_info(machHostPort, PROCESSOR_CPU_LOAD_INFO, &self.numCPUsU, &self.cpuInfo, &self.numCpuInfo)
         if result == KERN_SUCCESS {
             self.usagePerCore = []
-            
-            if let prevCpuInfo = self.prevCpuInfo {
-                for i in 0 ..< Int32(self.numCPUs) {
+            let cpuCount = Int(numCPUsU)
+            var logical = [Double?](repeating: nil, count: cpuCount)
+
+            if let prevCpuInfo = self.prevCpuInfo, self.numCpuInfo == self.numPrevCpuInfo,
+               Int(self.numCpuInfo) >= cpuCount * Int(CPU_STATE_MAX) {
+                for i in 0 ..< Int32(cpuCount) {
                     let user = UInt32(bitPattern: self.cpuInfo[Int(CPU_STATE_MAX * i + CPU_STATE_USER)])
                         &- UInt32(bitPattern: prevCpuInfo[Int(CPU_STATE_MAX * i + CPU_STATE_USER)])
                     let system = UInt32(bitPattern: self.cpuInfo[Int(CPU_STATE_MAX * i + CPU_STATE_SYSTEM)])
@@ -60,12 +56,19 @@ internal class LoadReader: Reader<CPU_Load> {
                     let inUse = UInt64(user) + UInt64(system) + UInt64(nice)
                     let total = inUse + UInt64(idle)
                     if total != 0 {
-                        self.usagePerCore.append(min(1, Double(inUse) / Double(total)))
+                        let usage = min(1, Double(inUse) / Double(total))
+                        logical[Int(i)] = usage
+                        self.usagePerCore.append(usage)
                     }
                 }
             }
+            #if arch(x86_64)
+            self.response.logicalUsage = logical
+            #endif
             let showHyperthratedCores = Store.shared.bool(key: "CPU_hyperhreading", defaultValue: false)
-            if showHyperthratedCores || !self.hasHyperthreadingCores {
+            if let raw = self.response.logicalUsage, raw.contains(where: { $0 == nil }) {
+                self.response.usagePerCore = []
+            } else if showHyperthratedCores || !self.hasHyperthreadingCores {
                 self.response.usagePerCore = self.usagePerCore
             } else {
                 var i = 0
@@ -92,6 +95,8 @@ internal class LoadReader: Reader<CPU_Load> {
             self.cpuInfo = nil
             self.numCpuInfo = 0
         } else {
+            self.response.logicalUsage = nil
+            self.response.usagePerCore = []
             error("host_processor_info(): \(String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error")", log: self.log)
         }
         
@@ -541,47 +546,48 @@ public class FrequencyReader: Reader<CPU_Frequency> {
     }
 }
 
-public class LimitReader: Reader<CPU_Limit> {
-    private var limits: CPU_Limit = CPU_Limit()
-    
+internal class IntelCPUReader: Reader<IntelCPUDetails> {
+    private let physical = Int(sysctlByName("hw.physicalcpu"))
+    private let logical = Int(sysctlByName("hw.logicalcpu"))
+    private let sampleFile = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Caches/eu.exelban.Stats-intel-cpu.txt")
+
+    public override func setup() {
+        self.setInterval(Store.shared.int(key: "CPU_updateInterval", defaultValue: 1))
+    }
+
     public override func read() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        task.arguments = ["-g", "therm"]
-        
-        let outputPipe = Pipe()
-        defer {
-            outputPipe.fileHandleForReading.closeFile()
+        var result = IntelCPUDetails()
+        let values = try? self.sampleFile.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey])
+        if values?.isRegularFile == true, let size = values?.fileSize, (1...16_384).contains(size),
+           let date = values?.contentModificationDate, (0...4).contains(Date().timeIntervalSince(date)),
+           let text = try? String(contentsOf: self.sampleFile, encoding: .utf8) {
+            let sample = IntelCPUSample.parse(text, physical: self.physical, logical: self.logical)
+            result.averageMHz = sample.averageMHz
+            result.coreThreadMHz = sample.coreThreadMHz
+            result.packageWatts = sample.packageWatts
+            result.headroomMHz = sample.headroomMHz
+            result.limitReasons = sample.limitReasons
+            result.frequencyDate = date
         }
-        task.standardOutput = outputPipe
-        
-        do {
-            try task.run()
-        } catch let err {
-            error("error read pmset: \(err.localizedDescription)", log: self.log)
-            return
+
+        let keys = ["TC0D", "TC0E", "TC0F", "TC0P", "TC0H"]
+        result.temperature = keys.lazy.compactMap { SMC.shared.getValue($0) }
+            .first { $0.isFinite && (1..<120).contains($0) }
+        if let watts = SMC.shared.getValue("PCPT"), watts.isFinite, watts > 0 {
+            result.packageWatts = watts
+            result.powerFromSMC = true
         }
-        
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        guard let str = String(data: outputData, encoding: .utf8) else { return }
-        var lines = str.split(separator: "\n")
-        guard lines.count > 3 else { return }
-        lines.removeFirst(3)
-        
-        lines.forEach { (line: Substring) in
-            guard let value = Int(line.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()) else {
-                return
-            }
-            if line.contains("Scheduler") {
-                self.limits.scheduler = value
-            } else if line.contains("CPUs") {
-                self.limits.cpus = value
-            } else if line.contains("Speed") {
-                self.limits.speed = value
-            }
+
+        var status: Unmanaged<CFDictionary>?
+        if IOPMCopyCPUPowerStatus(&status) == kIOReturnSuccess,
+           let limits = status?.takeRetainedValue() as? [String: Int] {
+            result.scheduler = limits[kIOPMCPUPowerLimitSchedulerTimeKey].flatMap { (0...100).contains($0) ? $0 : nil }
+            result.speed = limits[kIOPMCPUPowerLimitProcessorSpeedKey].flatMap { (0...100).contains($0) ? $0 : nil }
+            result.cpus = limits[kIOPMCPUPowerLimitProcessorCountKey].flatMap { (self.logical > 0 && (0...self.logical).contains($0)) ? $0 : nil }
         }
-        
-        self.callback(self.limits)
+        // Keep these live measurements out of the Reader's persistent cache.
+        self.callbackHandler(result)
     }
 }
 

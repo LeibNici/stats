@@ -582,3 +582,20 @@
 "Login to System Stats to see your devices" = "Login to System Stats to see your devices";
 "Monitor HTTP, ICMP and custom endpoints" = "Monitor HTTP, ICMP and custom endpoints";
 "Monitor and control your Macs from anywhere. Sign in to your System Stats account to see all your devices and hosts in one place." = "Monitor and control your Macs from anywhere. Sign in to your System Stats account to see all your devices and hosts in one place.";
+
+"Available logical CPUs" = "Available logical CPUs";
+"Average frequency" = "Average frequency";
+"Core clock" = "Core clock";
+"CPU package power" = "CPU package power";
+"Driver power" = "Driver power";
+"Fan speed" = "Fan speed";
+"Frequency headroom limited" = "Frequency headroom limited";
+"Logical thread" = "Logical thread";
+"Logical thread usage" = "Logical thread usage";
+"Memory clock" = "Memory clock";
+"Metric history" = "Metric history";
+"Physical core" = "Physical core";
+"Physical cores · SMT frequency averages" = "Physical cores · SMT frequency averages";
+"Reported limit reasons" = "Reported limit reasons";
+"SMT" = "SMT";
+"VRAM used" = "VRAM used";

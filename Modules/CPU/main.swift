@@ -9,9 +9,12 @@
 import Cocoa
 import Kit
 
+internal let cpuDefaultText = isARM ? "$usage" : "$usage · $frequency · $temperature · $power"
+
 public struct CPU_Load: Codable, RemoteType {
     public var totalUsage: Double = 0
     var usagePerCore: [Double] = []
+    var logicalUsage: [Double?]? = nil
     var usageECores: Double? = nil
     var usagePCores: Double? = nil
     var usageSCores: Double? = nil
@@ -37,10 +40,18 @@ public struct CPU_Frequency: Codable {
     var sCore: Double? = nil
 }
 
-public struct CPU_Limit: Codable {
-    var scheduler: Int = 0
-    var cpus: Int = 0
-    var speed: Int = 0
+public struct IntelCPUDetails: Codable {
+    var averageMHz: Double?
+    var coreThreadMHz: [[Double]] = []
+    var packageWatts: Double?
+    var powerFromSMC: Bool = false
+    var temperature: Double?
+    var scheduler: Int?
+    var cpus: Int?
+    var speed: Int?
+    var headroomMHz: Double?
+    var limitReasons: [String] = []
+    var frequencyDate: Date?
 }
 
 public struct CPU_AverageLoad: Codable, RemoteType {
@@ -65,9 +76,14 @@ public class CPU: Module {
     private var processReader: ProcessReader? = nil
     private var temperatureReader: TemperatureReader? = nil
     private var frequencyReader: FrequencyReader? = nil
-    private var limitReader: LimitReader? = nil
+    private var intelReader: IntelCPUReader? = nil
     private var averageLoadReader: AverageLoadReader? = nil
     
+    #if arch(x86_64)
+    private let intelDetailsLock = NSLock()
+    private var intelDetails = IntelCPUDetails()
+    #endif
+
     private var usagePerCoreState: Bool {
         Store.shared.bool(key: "\(self.config.name)_usagePerCore", defaultValue: false)
     }
@@ -151,15 +167,18 @@ public class CPU: Module {
             self?.popupView.averageCallback(value)
             self?.previewView.averageCallback(value)
         }
+        #if arch(x86_64)
+        self.intelReader = IntelCPUReader(.CPU) { [weak self] value in
+            guard let self, let value, self.enabled else { return }
+            self.intelDetailsLock.lock()
+            self.intelDetails = value
+            self.intelDetailsLock.unlock()
+            self.popupView.intelCallback(value)
+        }
+        #else
         self.temperatureReader = TemperatureReader(.CPU, popup: true) { [weak self] value in
             self?.popupView.temperatureCallback(value)
         }
-        
-        #if arch(x86_64)
-        self.limitReader = LimitReader(.CPU, popup: true) { [weak self] value in
-            self?.popupView.limitCallback(value)
-        }
-        #else
         self.frequencyReader = FrequencyReader(.CPU) { [weak self] value in
             self?.popupView.frequencyCallback(value)
             self?.previewView.frequencyCallback(value)
@@ -179,6 +198,7 @@ public class CPU: Module {
         }
         self.settingsView.setInterval = { [weak self] value in
             self?.loadReader?.setInterval(value)
+            self?.intelReader?.setInterval(value)
         }
         self.settingsView.setTopInterval = { [weak self] value in
             self?.processReader?.setInterval(value)
@@ -189,7 +209,7 @@ public class CPU: Module {
             self.processReader,
             self.temperatureReader,
             self.frequencyReader,
-            self.limitReader,
+            self.intelReader,
             self.averageLoadReader
         ])
     }
@@ -259,6 +279,28 @@ public class CPU: Module {
                     ColorValue(value.systemLoad, color: self.systemColor),
                     ColorValue(value.userLoad, color: self.userColor)
                 ])
+            case let widget as TextWidget:
+                let template = Store.shared.string(key: "CPU_textWidgetValue", defaultValue: cpuDefaultText)
+                let usage = "\(Int((value.totalUsage * 100).rounded()))%"
+                #if arch(x86_64)
+                self.intelDetailsLock.lock()
+                let details = self.intelDetails
+                self.intelDetailsLock.unlock()
+                let metrics: [String: String?] = [
+                    "$usage": usage,
+                    "$frequency": details.averageMHz.map { "\(Int($0.rounded())) MHz" },
+                    "$temperature": details.temperature.map { temperature($0) },
+                    "$power": details.packageWatts.map { String(format: "%.1f W", $0) },
+                    "$limit": details.speed.map { "\($0)%" }
+                ]
+                var text = template
+                for (key, replacement) in metrics {
+                    text = text.replacingOccurrences(of: key, with: replacement ?? "—")
+                }
+                widget.setValue(text)
+                #else
+                widget.setValue(template.replacingOccurrences(of: "$usage", with: usage))
+                #endif
             default: break
             }
         }

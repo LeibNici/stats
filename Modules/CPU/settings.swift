@@ -12,7 +12,7 @@
 import Cocoa
 import Kit
 
-internal class Settings: NSStackView, Settings_v {
+internal class Settings: NSStackView, Settings_v, NSTextFieldDelegate {
     private var usagePerCoreState: Bool = false
     private var hyperthreadState: Bool = false
     private var splitValueState: Bool = false
@@ -60,6 +60,11 @@ internal class Settings: NSStackView, Settings_v {
         fatalError("init(coder:) has not been implemented")
     }
     
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        Store.shared.set(key: "CPU_textWidgetValue", value: field.stringValue)
+    }
+
     public func load(widgets: [widget_t]) {
         self.subviews.forEach{ $0.removeFromSuperview() }
         
@@ -84,6 +89,17 @@ internal class Settings: NSStackView, Settings_v {
             ))
         ]))
         
+        if widgets.contains(.text) {
+            let field = NSTextField(string: Store.shared.string(key: "CPU_textWidgetValue", defaultValue: cpuDefaultText))
+            field.usesSingleLineMode = true
+            field.widthAnchor.constraint(equalToConstant: 230).isActive = true
+            field.delegate = self
+            field.toolTip = isARM ? "$usage" : "$usage $frequency $temperature $power $limit"
+            self.addArrangedSubview(PreferencesSection([
+                PreferencesRow(localizedString("Text widget value"), component: field)
+            ]))
+        }
+
         if widgets.contains(.barChart) {
             self.splitValueView = self.switchView(
                 action: #selector(self.toggleSplitValue),

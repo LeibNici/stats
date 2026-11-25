@@ -1353,12 +1353,15 @@ public class GaugeChartView: ChartView {
 
 public class ColumnChartView: ChartView {
     private var values: [ColorValue] = []
+    private var missing: Set<Int> = []
+    private var label: String?
     private var cursor: CGPoint? = nil
     
     public init(frame: NSRect = NSRect.zero, num: Int, animation: Bool = true) {
         super.init(frame: frame, queueLabel: "eu.exelban.Stats.Charts.Column")
         self.animationEnabled = animation
         self.values = Array(repeating: ColorValue(0, color: .controlAccentColor), count: num)
+        self.missing = Set(0..<num)
         
         self.addTrackingArea(NSTrackingArea(
             rect: CGRect(x: 0, y: 0, width: self.frame.width, height: self.frame.height),
@@ -1378,8 +1381,12 @@ public class ColumnChartView: ChartView {
     
     public override func draw(_ dirtyRect: NSRect) {
         var values: [ColorValue] = []
+        var missing: Set<Int> = []
+        var label: String?
         self.read {
             values = self.values
+            missing = self.missing
+            label = self.label
         }
         
         guard !values.isEmpty else { return }
@@ -1428,19 +1435,32 @@ public class ColumnChartView: ChartView {
         }
         
         if let p = self.cursor {
-            let matchingBlock = list.first(where: { $0.path.contains(p) })
-            if let block = matchingBlock {
-                let value = "\(Int(block.value.rounded(toPlaces: 2) * 100))%"
-                drawToolTip(self.bounds, p, value: value)
+            if let index = list.firstIndex(where: { $0.path.contains(p) }) {
+                let value = missing.contains(index) ? localizedString("Unavailable") : "\(Int((list[index].value * 100).rounded()))%"
+                let prefix = label.map { "\($0) \(index + 1) · " } ?? ""
+                drawToolTip(self.bounds, p, value: prefix + value)
             }
         }
     }
     
     public func setValues(_ values: [ColorValue]) {
-        self.write { self.values = sanitized(values) }
+        self.write {
+            self.values = sanitized(values)
+            self.missing = []
+            self.label = nil
+        }
         self.fadeOrDisplay()
     }
     
+    public func setOptionalValues(_ values: [Double?], label: String) {
+        self.write {
+            self.missing = Set(values.indices.filter { values[$0] == nil })
+            self.values = values.map { ColorValue($0 ?? 0, color: .systemBlue) }
+            self.label = label
+        }
+        self.fadeOrDisplay()
+    }
+
     public override func mouseEntered(with event: NSEvent) {
         self.cursor = self.convert(event.locationInWindow, from: nil)
         self.needsDisplay = true
@@ -1823,5 +1843,69 @@ public class BarChartView: ChartView {
     public func setValues(_ values: [ColorValue]) {
         self.write { self.values = sanitized(values) }
         self.fadeOrDisplay()
+    }
+}
+
+public final class TelemetryHistory {
+    private var values: [String: LineChartData] = [:]
+
+    public init() {}
+
+    public func append(_ name: String, _ value: Double?, at date: Date = Date()) {
+        guard let value else { return }
+        self.series(name).append(DoubleValue(value, at: date))
+    }
+
+    public func series(_ name: String) -> LineChartData {
+        if let existing = self.values[name] { return existing }
+        let history = LineChartData(capacity: 180)
+        self.values[name] = history
+        return history
+    }
+}
+
+public final class TelemetryChartView: NSView {
+    private let history: TelemetryHistory
+    private let metrics: [(name: String, unit: String)]
+    private let selector: NSPopUpButton
+    private var chart: LineChartView?
+
+    public init(width: CGFloat, metrics: [(String, String)], history: TelemetryHistory) {
+        self.history = history
+        self.metrics = metrics
+        self.selector = NSPopUpButton(frame: NSRect(x: 7, y: 68, width: width - 14, height: 24))
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 96))
+        self.heightAnchor.constraint(equalToConstant: 96).isActive = true
+        self.selector.setAccessibilityLabel(localizedString("Metric history"))
+        self.selector.addItems(withTitles: metrics.map { $0.0 })
+        self.selector.target = self
+        self.selector.action = #selector(self.selectMetric)
+        self.addSubview(self.selector)
+        self.selectMetric()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func selectMetric() {
+        let index = self.selector.indexOfSelectedItem
+        guard self.metrics.indices.contains(index) else { return }
+        let metric = self.metrics[index]
+        let chart = LineChartView(
+            frame: NSRect(x: 7, y: 0, width: self.bounds.width - 14, height: 62),
+            suffix: "", scale: .linear, zeroValue: 0, animation: false, history: self.history.series(metric.name)
+        )
+        chart.setToolTipFunc { sample in
+            String(format: "%.1f %@", sample.value, metric.unit)
+        }
+        chart.setLegend(x: true, y: false)
+        self.chart?.removeFromSuperview()
+        self.chart = chart
+        self.addSubview(chart)
+    }
+
+    public func historyUpdated() {
+        self.chart?.historyUpdated()
     }
 }
